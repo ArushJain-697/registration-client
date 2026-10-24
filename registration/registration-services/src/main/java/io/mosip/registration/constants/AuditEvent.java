@@ -313,6 +313,15 @@ public enum AuditEvent {
 	REG_BLOCKLISTED_WORD_REJECTED("REG-EVT-103", USER_EVENT.getCode(), "REG_BLOCKLISTED_WORD_REJECTED",
 			"Demographic Details : A blocklisted word has been rejected in Registration"),
 	
+
+	// SAJEEV liveness (own ID block REG-LIV, no clash with the REG-AUTH, REG-EVT, REG-NAV, REG-NOT, REG-PKT, REG-SCH, REG-SYNC and REG-UPG blocks)
+	REG_LIVENESS_START("REG-LIV-001", USER_EVENT.getCode(), "REG_LIVENESS_START", "Liveness check started"),
+	REG_LIVENESS_PASSIVE_RESULT("REG-LIV-002", USER_EVENT.getCode(), "REG_LIVENESS_PASSIVE_RESULT", "Passive liveness result"),
+	REG_LIVENESS_CHALLENGE_PROMPTED("REG-LIV-003", USER_EVENT.getCode(), "REG_LIVENESS_CHALLENGE_PROMPTED", "Active challenge prompted"),
+	REG_LIVENESS_CHALLENGE_RESULT("REG-LIV-004", USER_EVENT.getCode(), "REG_LIVENESS_CHALLENGE_RESULT", "Active challenge result"),
+	REG_LIVENESS_BINDING("REG-LIV-005", USER_EVENT.getCode(), "REG_LIVENESS_BINDING", "Captured face bound to the live face"),
+	REG_LIVENESS_VERDICT("REG-LIV-006", USER_EVENT.getCode(), "REG_LIVENESS_VERDICT", "Liveness verdict"),
+	REG_LIVENESS_ENGINE_UNAVAILABLE("REG-LIV-009", SYSTEM_EVENT.getCode(), "REG_LIVENESS_ENGINE_UNAVAILABLE", "Liveness engine unavailable"),
 	CLIENT_UPGRADE_JARS_DOWNLOADED("REG-UPG-001", USER_EVENT.getCode(), "CLIENT_UPGRADE_JARS_DOWNLOADED",
 			"Client Upgrade: Successfully downloaded all the upgrade jars"),
 	CLIENT_DB_UPGRADE_SCRIPTS("REG-UPG-001", USER_EVENT.getCode(), "CLIENT_DB_UPGRADE_SCRIPTS",

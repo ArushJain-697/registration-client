@@ -49,6 +49,14 @@ public class Streamer {
 
 	private boolean isRunning = true;
 
+	// SAJEEV: receives each frame as it arrives (null = nobody listening). A failing listener never stops the stream.
+	private volatile java.util.function.Consumer<byte[]> frameListener;
+
+	public void setFrameListener(java.util.function.Consumer<byte[]> listener) {
+		this.frameListener = listener;
+	}
+
+
 	private final String CONTENT_LENGTH = "Content-Length:";
 
 	private Thread streamer_thread = null;
@@ -98,6 +106,14 @@ public class Streamer {
 				while (null != urlStream) {
 					try {
 						imageBytes = retrieveNextImage(urlStream);
+						java.util.function.Consumer<byte[]> l = frameListener;
+						if (l != null) {
+							try {
+								l.accept(imageBytes);
+							} catch (RuntimeException e) {
+								LOGGER.error("Frame listener failed", e);
+							}
+						}
 						ByteArrayInputStream imageStream = new ByteArrayInputStream(imageBytes);
 						Image img = new Image(imageStream);
 						streamImage.setImage(img);

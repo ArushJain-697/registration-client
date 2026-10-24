@@ -31,4 +31,24 @@ public class LivenessFacadeTest {
         assertEquals(LivenessOutcome.UNAVAILABLE, r.getOutcome());
         assertFalse(r.isLive());
     }
+
+    @Test
+    public void test_no_session_provider_fails_closed() {
+        LivenessFacade f = new LivenessFacade();
+        LivenessSessionHandle h = f.openSession("RESIDENT");
+        assertEquals(LivenessProgress.Phase.UNAVAILABLE, h.progress().getPhase());
+        assertFalse(h.progress().isLive());
+        assertFalse(h.checkCapture(new byte[] {1}, 3000).isBound());
+    }
+
+    @Test
+    public void test_provider_that_throws_fails_closed() {
+        LivenessFacade f = new LivenessFacade();
+        LivenessSessionProvider bad = new LivenessSessionProvider() {
+            public String getServiceName() { return "bad"; }
+            public LivenessSessionHandle open(String w) { throw new IllegalStateException("boom"); }
+        };
+        ReflectionTestUtils.setField(f, "sessionProviders", Collections.singletonList(bad));
+        assertEquals(LivenessProgress.Phase.UNAVAILABLE, f.openSession("OPERATOR").progress().getPhase());
+    }
 }

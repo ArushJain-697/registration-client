@@ -19,6 +19,9 @@ public class LivenessFacade {
     @Autowired(required = false)
     private List<LivenessService> livenessServices;
 
+    @Autowired(required = false)
+    private List<LivenessSessionProvider> sessionProviders;
+
     public LivenessResult evaluate(String workflow, List<byte[]> frameJpegs) {
         if (livenessServices == null || livenessServices.isEmpty()) {
             LOGGER.warn("No liveness service registered: failing closed");
@@ -31,6 +34,57 @@ public class LivenessFacade {
         } catch (RuntimeException e) {
             LOGGER.error("Liveness service " + service.getServiceName() + " failed", e);
             return new LivenessResult(LivenessOutcome.UNAVAILABLE, "service_error");
+        }
+    }
+
+    /**
+     * Open a liveness session. Fails closed: no provider, or a provider that throws, gives a session that is
+     * UNAVAILABLE for its whole life and never binds a capture.
+     *
+     * @param workflow RESIDENT, OPERATOR or SUPERVISOR
+     * @return a session handle; never null
+     */
+    public LivenessSessionHandle openSession(String workflow) {
+        if (sessionProviders == null || sessionProviders.isEmpty()) {
+            LOGGER.warn("No liveness session provider registered: failing closed");
+            return new UnavailableSession("no_liveness_service");
+        }
+        LivenessSessionProvider provider = sessionProviders.get(0);
+        try {
+            LivenessSessionHandle h = provider.open(workflow);
+            return h == null ? new UnavailableSession("null_session") : h;
+        } catch (RuntimeException e) {
+            LOGGER.error("Liveness provider " + provider.getServiceName() + " failed to open a session", e);
+            return new UnavailableSession("service_error");
+        }
+    }
+
+    /** A session that never reaches LIVE. */
+    private static final class UnavailableSession implements LivenessSessionHandle {
+        private final String reason;
+
+        UnavailableSession(String reason) {
+            this.reason = reason;
+        }
+
+        @Override
+        public void onFrame(byte[] jpeg) {
+            // nothing to do: this session can never become live
+        }
+
+        @Override
+        public LivenessProgress progress() {
+            return new LivenessProgress(LivenessProgress.Phase.UNAVAILABLE, null, "liveness.error.engine", reason);
+        }
+
+        @Override
+        public LivenessCaptureCheck checkCapture(byte[] capturedImage, long captureTimeoutMillis) {
+            return new LivenessCaptureCheck(false, reason);
+        }
+
+        @Override
+        public void close() {
+            // nothing held
         }
     }
 }

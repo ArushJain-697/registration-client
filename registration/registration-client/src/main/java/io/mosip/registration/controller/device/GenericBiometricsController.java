@@ -46,6 +46,11 @@ import io.mosip.registration.service.BaseService;
 import io.mosip.registration.service.bio.BioService;
 import io.mosip.registration.util.control.FxControl;
 import io.mosip.registration.util.control.impl.BiometricFxControl;
+import io.mosip.registration.api.liveness.LivenessProgress;
+import io.mosip.registration.service.liveness.LivenessCaptureCoordinator;
+import io.mosip.registration.service.liveness.LivenessMessages;
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
 import javafx.concurrent.Service;
 import javafx.concurrent.Task;
 import javafx.concurrent.WorkerStateEvent;
@@ -198,6 +203,18 @@ public class GenericBiometricsController extends BaseController {
 	@FXML
 	private GridPane parentProgressPane;
 
+	@Autowired
+	private LivenessCaptureCoordinator livenessCoordinator;
+
+	private Timeline livenessPoll;
+
+	/** RESIDENT here; the authentication controllers set OPERATOR or SUPERVISOR before they start a capture. */
+	private String livenessWorkflow = "RESIDENT";
+
+	public void setLivenessWorkflow(String workflow) {
+		this.livenessWorkflow = workflow;
+	}
+
 	private Service<List<BiometricsDto>> rCaptureTaskService;
 
 	private Service<MdmBioDevice> deviceSearchTask;
@@ -217,6 +234,7 @@ public class GenericBiometricsController extends BaseController {
 	private Stage biometricPopUpStage;
 
 	public void stopRCaptureService() {
+		stopLiveness();
 		if (rCaptureTaskService != null && rCaptureTaskService.isRunning()) {
 			rCaptureTaskService.cancel();
 		}
@@ -488,8 +506,23 @@ public class GenericBiometricsController extends BaseController {
 						generateAlert(RegistrationConstants.ERROR, RegistrationUIConstants.getMessageLanguageSpecific(RegistrationUIConstants.STREAMING_ERROR));
 						return;
 					}
-					rCaptureTaskService();
-					streamer.startStream(urlStream, biometricImage, biometricImage);
+					if (livenessRequired()) {
+						// SAJEEV: the face must be seen live BEFORE the device captures (order changed on purpose)
+						if (livenessCoordinator.retriesExhausted()) {
+							generateAlert(RegistrationConstants.ERROR, LivenessMessages.text("failure.max_retries", livenessLang()));
+							streamer.setUrlStream(null);
+							SessionContext.setAutoLogout(true);
+							disableEnableBiometricPane(false);
+							return;
+						}
+						livenessCoordinator.begin(livenessWorkflow);
+						streamer.setFrameListener(livenessCoordinator::onFrame);
+						streamer.startStream(urlStream, biometricImage, biometricImage);
+						startLivenessPolling();
+					} else {
+						rCaptureTaskService();
+						streamer.startStream(urlStream, biometricImage, biometricImage);
+					}
 
 				} catch (RegBaseCheckedException | IOException exception) {
 					LOGGER.error("Error while streaming : " + currentModality,  exception);
@@ -546,6 +579,61 @@ public class GenericBiometricsController extends BaseController {
 	}
 
 
+	private boolean livenessRequired() {
+		return livenessCoordinator != null && io.mosip.registration.service.liveness.LivenessClientConfig.enabled() && isFace(currentModality) && !isExceptionPhoto(currentModality);
+	}
+
+	private String livenessLang() {
+		String code = applicationContext.getApplicationLanguage();
+		return code != null && code.startsWith("fr") ? "fr" : code != null && code.startsWith("ar") ? "ar" : "en";
+	}
+
+	/** Shows the guidance or challenge on the screen and starts the capture only when the person is live. */
+	private void startLivenessPolling() {
+		stopLivenessPoll();
+		livenessPoll = new Timeline(new KeyFrame(javafx.util.Duration.millis(200), e -> {
+			LivenessProgress p = livenessCoordinator.progress();
+			String key = p.getChallenge() != null ? p.getChallenge() : p.getGuidanceKey();
+			photoAlert.setText(LivenessMessages.text(key, livenessLang()));
+			LivenessCaptureCoordinator.Gate g = livenessCoordinator.pollBeforeCapture();
+			switch (g) {
+			case WAIT:
+				return;
+			case START_CAPTURE:
+				stopLivenessPoll();
+				photoAlert.setText("");
+				rCaptureTaskService();
+				return;
+			default:
+				stopLivenessPoll();
+				generateAlert(RegistrationConstants.ERROR, LivenessMessages.text(
+						livenessCoordinator.retriesExhausted() ? "failure.max_retries"
+								: g == LivenessCaptureCoordinator.Gate.REFUSE_UNAVAILABLE ? "error.engine" : "failure.liveness",
+						livenessLang()));
+				streamer.setUrlStream(null);
+				SessionContext.setAutoLogout(true);
+				disableEnableBiometricPane(false);
+			}
+		}));
+		livenessPoll.setCycleCount(Timeline.INDEFINITE);
+		livenessPoll.play();
+	}
+
+	private void stopLivenessPoll() {
+		if (livenessPoll != null) {
+			livenessPoll.stop();
+			livenessPoll = null;
+		}
+	}
+
+	private void stopLiveness() {
+		stopLivenessPoll();
+		streamer.setFrameListener(null);
+		if (livenessCoordinator != null) {
+			livenessCoordinator.end();
+		}
+	}
+
 	public void rCaptureTaskService() {
 		LOGGER.debug("Capture request called at : {}", System.currentTimeMillis());
 
@@ -594,6 +682,19 @@ public class GenericBiometricsController extends BaseController {
 				LOGGER.debug("RCapture task was successful");
 				try {
 					List<BiometricsDto> mdsCapturedBiometricsList = rCaptureTaskService.getValue();
+					if (livenessRequired()) {
+						// SAJEEV: nothing is validated, de-duplicated or stored until the capture is live AND bound
+						byte[] iso = mdsCapturedBiometricsList == null || mdsCapturedBiometricsList.isEmpty() ? null
+								: mdsCapturedBiometricsList.get(0).getAttributeISO();
+						LivenessCaptureCoordinator.Gate gate = iso == null ? LivenessCaptureCoordinator.Gate.REFUSE_UNBOUND
+								: livenessCoordinator.decideStore(iso, 30000);
+						if (gate != LivenessCaptureCoordinator.Gate.STORE) {
+							LOGGER.warn("Liveness refused the captured face: {}", gate);
+							generateAlert(RegistrationConstants.ERROR, LivenessMessages.text(
+									livenessCoordinator.retriesExhausted() ? "failure.max_retries" : "failure.liveness", livenessLang()));
+							return;
+						}
+					}
 					boolean isValidBiometric = isValidBiometric(mdsCapturedBiometricsList);
 					LOGGER.debug("biometrics captured from mock/real MDM was valid : {}", isValidBiometric);
 
@@ -642,6 +743,7 @@ public class GenericBiometricsController extends BaseController {
 					LOGGER.error("Exception while getting the scanned biometrics for user registration",e);
 					generateAlert(RegistrationConstants.ERROR, RegistrationUIConstants.getMessageLanguageSpecific(RegistrationUIConstants.BIOMETRIC_SCANNING_ERROR));
 				} finally {
+					stopLiveness();
 					SessionContext.setAutoLogout(true);	// Enable Auto-Logout
 					streamer.setUrlStream(null);
 

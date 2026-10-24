@@ -30,6 +30,39 @@ public final class LivenessClientConfig {
 		}
 	}
 
+	/** @return the device capture timeout in milliseconds (the client's own setting), 30 s when it is not set */
+	public static long captureTimeoutMillis() {
+		try {
+			int v = ApplicationContext.getIntValueFromApplicationMap(io.mosip.registration.constants.RegistrationConstants.CAPTURE_TIME_OUT);
+			return v > 0 ? v : 30_000L;
+		} catch (RuntimeException e) {
+			return 30_000L;
+		}
+	}
+
+	/**
+	 * Every engine setting (mosip.registration.liveness.*, with the .resident/.operator/.supervisor overrides) that the
+	 * client's configuration holds, so the engine's threshold, challenge types, minimum challenges, timeout and
+	 * per-workflow policy follow the client's configuration. Keys that are not set keep the engine defaults.
+	 */
+	public static java.util.Properties engineProperties() {
+		java.util.Properties p = new java.util.Properties();
+		for (String key : io.sajeev.policy.Config.DEFAULTS.keySet()) {
+			put(p, key);
+			for (String w : io.sajeev.policy.Config.WORKFLOWS) {
+				put(p, key + "." + w);
+			}
+		}
+		return p;
+	}
+
+	private static void put(java.util.Properties p, String suffix) {
+		String v = raw(PREFIX + suffix);
+		if (v != null && !v.trim().isEmpty()) {
+			p.setProperty(PREFIX + suffix, v.trim());
+		}
+	}
+
 	/** @return the folder with guidance text overrides, or "none" (the default) */
 	public static String guidanceOverrides() {
 		String v = raw(GUIDANCE_OVERRIDES);

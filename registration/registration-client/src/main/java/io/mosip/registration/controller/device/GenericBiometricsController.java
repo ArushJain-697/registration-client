@@ -259,6 +259,9 @@ public class GenericBiometricsController extends BaseController {
 				RegistrationConstants.LABELS);
 		setImage(scanImageView	, RegistrationConstants.SCAN_IMG);
 		setImage(closeButtonImageView	, RegistrationConstants.CLOSE_IMG);
+		if (livenessCoordinator != null) {
+			livenessCoordinator.resetAttempts(livenessWorkflow); // a new screen is a new attempt flow
+		}
 	}
 
 	public boolean isBiometricExceptionProofCollected(String fieldId) {
@@ -508,7 +511,7 @@ public class GenericBiometricsController extends BaseController {
 					}
 					if (livenessRequired()) {
 						// SAJEEV: the face must be seen live BEFORE the device captures (order changed on purpose)
-						if (livenessCoordinator.retriesExhausted()) {
+						if (livenessCoordinator.retriesExhausted(livenessWorkflow)) {
 							generateAlert(RegistrationConstants.ERROR, LivenessMessages.text("failure.max_retries", livenessLang()));
 							streamer.setUrlStream(null);
 							SessionContext.setAutoLogout(true);
@@ -687,7 +690,7 @@ public class GenericBiometricsController extends BaseController {
 						byte[] iso = mdsCapturedBiometricsList == null || mdsCapturedBiometricsList.isEmpty() ? null
 								: mdsCapturedBiometricsList.get(0).getAttributeISO();
 						LivenessCaptureCoordinator.Gate gate = iso == null ? LivenessCaptureCoordinator.Gate.REFUSE_UNBOUND
-								: livenessCoordinator.decideStore(iso, 30000);
+								: livenessCoordinator.decideStore(iso, io.mosip.registration.service.liveness.LivenessClientConfig.captureTimeoutMillis());
 						if (gate != LivenessCaptureCoordinator.Gate.STORE) {
 							LOGGER.warn("Liveness refused the captured face: {}", gate);
 							generateAlert(RegistrationConstants.ERROR, LivenessMessages.text(

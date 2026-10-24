@@ -190,4 +190,26 @@ public class LivenessCaptureCoordinatorTest {
 	public void test_supervisor_approval_blocked_when_liveness_fails() throws Exception {
 		blockedWhenLivenessFails("SUPERVISOR");
 	}
+
+	@Test
+	public void test_failures_of_one_workflow_do_not_lock_another() {
+		Fake f = new Fake(Phase.NOT_LIVE, false);
+		LivenessCaptureCoordinator c = with(f);
+		c.begin("OPERATOR");
+		c.setMaxRetries(1);
+		assertEquals(Gate.REFUSE_NOT_LIVE, c.pollBeforeCapture());
+		assertTrue(c.retriesExhausted("OPERATOR") || c.retriesExhausted());
+		assertFalse("an operator's failures locked resident capture", c.retriesExhausted("RESIDENT"));
+		c.resetAttempts("OPERATOR");
+		assertEquals(0, c.failedAttempts());
+	}
+
+	@Test
+	public void test_one_live_verdict_stores_one_capture() throws Exception {
+		Fake f = new Fake(Phase.LIVE, true);
+		LivenessCaptureCoordinator c = with(f);
+		assertEquals(Gate.STORE, c.decideStore(png(), 3000));
+		assertTrue(f.closed);
+		assertEquals("a second capture was stored on the same live verdict", Gate.REFUSE_UNAVAILABLE, c.decideStore(png(), 3000));
+	}
 }

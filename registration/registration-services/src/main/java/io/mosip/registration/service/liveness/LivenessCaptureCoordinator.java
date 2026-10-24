@@ -52,7 +52,7 @@ public class LivenessCaptureCoordinator {
 	private String workflow;
 	private long startedMillis;
 	private long sessionTimeoutMillis = 45_000;
-	private int failedAttempts;
+	private final java.util.Map<String, Integer> failures = new java.util.HashMap<>();
 	private int maxRetries = 3;
 
 	public LivenessCaptureCoordinator() {
@@ -139,7 +139,7 @@ public class LivenessCaptureCoordinator {
 			}
 			return Gate.WAIT;
 		case NOT_LIVE:
-			failedAttempts++;
+			countFailure();
 			audit(AuditEvent.REG_LIVENESS_VERDICT);
 			return Gate.REFUSE_NOT_LIVE;
 		default:
@@ -163,7 +163,7 @@ public class LivenessCaptureCoordinator {
 			if (p.getPhase() == LivenessProgress.Phase.UNAVAILABLE) {
 				return Gate.REFUSE_UNAVAILABLE;
 			}
-			failedAttempts++;
+			countFailure();
 			return Gate.REFUSE_NOT_LIVE;
 		}
 		byte[] png = CapturedFaceImage.toPng(capturedIsoOrImage);
@@ -171,25 +171,44 @@ public class LivenessCaptureCoordinator {
 				: session.checkCapture(png, captureTimeoutMillis);
 		audit(AuditEvent.REG_LIVENESS_BINDING);
 		if (!check.isBound()) {
-			failedAttempts++;
+			countFailure();
 			LOGGER.warn("Captured face refused: {}", check.getReason());
 			return Gate.REFUSE_UNBOUND;
 		}
-		failedAttempts = 0;
+		failures.put(key(), 0);
+		end(); // one live verdict stores one capture
 		return Gate.STORE;
 	}
 
 	/** @return true when the retry limit is reached: the screen must stop offering another attempt */
 	public synchronized boolean retriesExhausted() {
-		return failedAttempts >= maxRetries;
+		return failures.getOrDefault(key(), 0) >= maxRetries;
+	}
+
+	/** @return true when this workflow has used all its attempts (checked before a session starts) */
+	public synchronized boolean retriesExhausted(String workflowName) {
+		return failures.getOrDefault(workflowName, 0) >= LivenessClientConfig.maxRetries();
 	}
 
 	public synchronized int failedAttempts() {
-		return failedAttempts;
+		return failures.getOrDefault(key(), 0);
 	}
 
 	public synchronized void resetAttempts() {
-		failedAttempts = 0;
+		failures.clear();
+	}
+
+	/** Starts a new attempt flow for one workflow (a new registration or a new login): its counter only. */
+	public synchronized void resetAttempts(String workflowName) {
+		failures.remove(workflowName);
+	}
+
+	private String key() {
+		return workflow == null ? "LIVENESS" : workflow;
+	}
+
+	private void countFailure() {
+		failures.merge(key(), 1, Integer::sum);
 	}
 
 	/** Close the session and release its frames. Safe to call more than once. */

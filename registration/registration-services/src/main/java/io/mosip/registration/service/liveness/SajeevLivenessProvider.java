@@ -18,7 +18,6 @@ import io.mosip.registration.api.liveness.LivenessSessionProvider;
 import io.sajeev.api.ChallengeType;
 import io.sajeev.api.ErrorState;
 import io.sajeev.api.Frame;
-import io.sajeev.api.PolicyConfig;
 import io.sajeev.api.Verdict;
 import io.sajeev.api.Workflow;
 import io.sajeev.audit.AuditLog;
@@ -55,7 +54,7 @@ public class SajeevLivenessProvider implements LivenessSessionProvider {
 		if (e == null) {
 			throw new IllegalStateException("liveness engine not available");
 		}
-		return new Handle(e.start(Workflow.valueOf(workflow), new PolicyConfig(0.80, 2, 3)));
+		return new Handle(e.start(Workflow.valueOf(workflow)));
 	}
 
 	private synchronized LivenessEngine engine() {
@@ -64,7 +63,8 @@ public class SajeevLivenessProvider implements LivenessSessionProvider {
 				Path dir = Paths.get(System.getProperty("mosip.registration.liveness.model.dir", "models"));
 				// Models load only after the signed manifest verifies. Turning that off is an explicit, logged decision for development.
 				EngineModels models;
-				if ("false".equalsIgnoreCase(System.getProperty("mosip.registration.liveness.model.verify"))) {
+				if ("false".equalsIgnoreCase(System.getProperty("mosip.registration.liveness.model.verify"))
+						&& "true".equalsIgnoreCase(System.getProperty("mosip.registration.liveness.dev"))) {
 					LOGGER.warn("Model signature verification is switched OFF by mosip.registration.liveness.model.verify=false");
 					models = new EngineModels(dir);
 				} else {
@@ -73,7 +73,7 @@ public class SajeevLivenessProvider implements LivenessSessionProvider {
 							? new io.sajeev.model.ModelStore(dir, EngineModels.bundledTrustRoot()).currentDir() : dir;
 					models = EngineModels.loadVerified(inUse, EngineModels.bundledTrustRoot(), 0);
 				}
-				engine = new LivenessEngine(models, Config.load(new Properties()), EngineSettings.defaults(),
+				engine = new LivenessEngine(models, loadConfig(), EngineSettings.defaults(),
 						new AuditLog(System::currentTimeMillis), new LivenessMetrics());
 			} catch (Exception | LinkageError ex) {
 				LOGGER.error("The liveness engine could not start; every liveness check will be refused", ex);
@@ -81,6 +81,16 @@ public class SajeevLivenessProvider implements LivenessSessionProvider {
 			}
 		}
 		return engine;
+	}
+
+	/** The client's liveness settings; a bad value is logged and the defaults are used, so liveness is never switched off by a typo. */
+	private static Config loadConfig() throws Config.ConfigException {
+		try {
+			return Config.load(LivenessClientConfig.engineProperties());
+		} catch (Config.ConfigException | RuntimeException ex) {
+			LOGGER.error("Invalid liveness configuration; using the defaults", ex);
+			return Config.load(new Properties());
+		}
 	}
 
 	@PreDestroy

@@ -1732,7 +1732,7 @@ public class BaseController {
 
 		if (livenessOn) {
 			byte[] iso = biometrics == null || biometrics.isEmpty() ? null : biometrics.get(0).getAttributeISO();
-			boolean stored = iso != null && authLivenessCoordinator.decideStore(iso, 30000) == LivenessCaptureCoordinator.Gate.STORE;
+			boolean stored = iso != null && authLivenessCoordinator.decideStore(iso, io.mosip.registration.service.liveness.LivenessClientConfig.captureTimeoutMillis()) == LivenessCaptureCoordinator.Gate.STORE;
 			authLivenessCoordinator.end();
 			if (!stored) {
 				LOGGER.warn("Face authentication refused: captured face not bound to the live face");

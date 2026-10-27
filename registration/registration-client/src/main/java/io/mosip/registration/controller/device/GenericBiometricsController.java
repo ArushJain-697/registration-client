@@ -208,6 +208,9 @@ public class GenericBiometricsController extends BaseController {
 
 	private Timeline livenessPoll;
 
+	/** The verdict of the liveness binding for the capture that just finished (set on the task thread). */
+	private volatile LivenessCaptureCoordinator.Gate capturedGate;
+
 	/** RESIDENT here; the authentication controllers set OPERATOR or SUPERVISOR before they start a capture. */
 	private String livenessWorkflow = "RESIDENT";
 
@@ -259,9 +262,9 @@ public class GenericBiometricsController extends BaseController {
 				RegistrationConstants.LABELS);
 		setImage(scanImageView	, RegistrationConstants.SCAN_IMG);
 		setImage(closeButtonImageView	, RegistrationConstants.CLOSE_IMG);
-		if (livenessCoordinator != null) {
-			livenessCoordinator.resetAttempts(livenessWorkflow); // a new screen is a new attempt flow
-		}
+		// SAJEEV: the retry counter is NOT reset here. This controller is a prototype and the popup loads initialize()
+		// on every open, so a reset here made the retries unlimited. It is reset on a STORE, on a new registration
+		// (RegistrationController.createRegistrationDTOObject) and on login or logout (SessionContext).
 	}
 
 	public boolean isBiometricExceptionProofCollected(String fieldId) {
@@ -523,11 +526,13 @@ public class GenericBiometricsController extends BaseController {
 						streamer.startStream(urlStream, biometricImage, biometricImage);
 						startLivenessPolling();
 					} else {
+						recordLivenessOff();
 						rCaptureTaskService();
 						streamer.startStream(urlStream, biometricImage, biometricImage);
 					}
 
 				} catch (RegBaseCheckedException | IOException exception) {
+					stopLiveness();
 					LOGGER.error("Error while streaming : " + currentModality,  exception);
 					generateAlert(RegistrationConstants.ERROR, RegistrationUIConstants.getMessageLanguageSpecific(RegistrationUIConstants.STREAMING_ERROR));
 
@@ -583,7 +588,22 @@ public class GenericBiometricsController extends BaseController {
 
 
 	private boolean livenessRequired() {
-		return livenessCoordinator != null && io.mosip.registration.service.liveness.LivenessClientConfig.enabled() && isFace(currentModality) && !isExceptionPhoto(currentModality);
+		if (livenessCoordinator == null || !(isFace(currentModality) || isExceptionPhoto(currentModality))) {
+			return false;
+		}
+		// the exception photo is a real face capture, so it is gated like a face unless the exception key says otherwise
+		return io.mosip.registration.service.liveness.LivenessClientConfig.enabled()
+				&& (!isExceptionPhoto(currentModality)
+						|| io.mosip.registration.service.liveness.LivenessClientConfig.exceptionPhotoEnabled());
+	}
+
+	/** A face is about to be captured without a liveness check because configuration says so: never silent. */
+	private void recordLivenessOff() {
+		if (livenessCoordinator != null && (isFace(currentModality) || isExceptionPhoto(currentModality))) {
+			livenessCoordinator.recordDisabled(livenessWorkflow,
+					io.mosip.registration.service.liveness.LivenessClientConfig.enabled()
+							? "mosip.registration.liveness.exceptionPhoto.enabled=false" : "mosip.registration.liveness.enabled=false");
+		}
 	}
 
 	private String livenessLang() {
@@ -608,7 +628,7 @@ public class GenericBiometricsController extends BaseController {
 				rCaptureTaskService();
 				return;
 			default:
-				stopLivenessPoll();
+				stopLiveness(); // end the session and clear the frame listener on every refusal
 				generateAlert(RegistrationConstants.ERROR, LivenessMessages.text(
 						livenessCoordinator.retriesExhausted() ? "failure.max_retries"
 								: g == LivenessCaptureCoordinator.Gate.REFUSE_UNAVAILABLE ? "error.engine" : "failure.liveness",
@@ -653,7 +673,14 @@ public class GenericBiometricsController extends BaseController {
 					protected List<BiometricsDto> call() throws RegBaseCheckedException, IOException {
 
 						LOGGER.info("Capture request started {}", System.currentTimeMillis());
-						return rCapture(fxControl.getUiSchemaDTO().getId(), currentModality);
+						capturedGate = null;
+						List<BiometricsDto> captured = rCapture(fxControl.getUiSchemaDTO().getId(), currentModality);
+						if (livenessRequired()) {
+							// SAJEEV: the binding inference runs here, on the task thread, never on the FX thread
+							capturedGate = livenessCoordinator.decideStoreFor(captured,
+									io.mosip.registration.service.liveness.LivenessClientConfig.captureTimeoutMillis());
+						}
+						return captured;
 
 					}
 				};
@@ -665,6 +692,7 @@ public class GenericBiometricsController extends BaseController {
 			@Override
 			public void handle(WorkerStateEvent t) {
 				LOGGER.debug("RCapture task failed");
+				stopLiveness();
 				generateAlert(RegistrationConstants.ERROR, RegistrationUIConstants.getMessageLanguageSpecific(RegistrationUIConstants.BIOMETRIC_SCANNING_ERROR));
 
 				LOGGER.debug("Enabling LogOut");
@@ -687,10 +715,7 @@ public class GenericBiometricsController extends BaseController {
 					List<BiometricsDto> mdsCapturedBiometricsList = rCaptureTaskService.getValue();
 					if (livenessRequired()) {
 						// SAJEEV: nothing is validated, de-duplicated or stored until the capture is live AND bound
-						byte[] iso = mdsCapturedBiometricsList == null || mdsCapturedBiometricsList.isEmpty() ? null
-								: mdsCapturedBiometricsList.get(0).getAttributeISO();
-						LivenessCaptureCoordinator.Gate gate = iso == null ? LivenessCaptureCoordinator.Gate.REFUSE_UNBOUND
-								: livenessCoordinator.decideStore(iso, io.mosip.registration.service.liveness.LivenessClientConfig.captureTimeoutMillis());
+						LivenessCaptureCoordinator.Gate gate = capturedGate;
 						if (gate != LivenessCaptureCoordinator.Gate.STORE) {
 							LOGGER.warn("Liveness refused the captured face: {}", gate);
 							generateAlert(RegistrationConstants.ERROR, LivenessMessages.text(

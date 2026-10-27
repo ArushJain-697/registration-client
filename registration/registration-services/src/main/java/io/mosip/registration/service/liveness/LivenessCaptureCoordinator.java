@@ -48,7 +48,7 @@ public class LivenessCaptureCoordinator {
 	@Autowired(required = false)
 	private AuditManagerService auditFactory;
 
-	private LivenessSessionHandle session;
+	private volatile LivenessSessionHandle session;
 	private String workflow;
 	private long startedMillis;
 	private long sessionTimeoutMillis = 45_000;
@@ -103,6 +103,18 @@ public class LivenessCaptureCoordinator {
 		if (session == null || session.progress().getPhase() == LivenessProgress.Phase.UNAVAILABLE) {
 			audit(AuditEvent.REG_LIVENESS_ENGINE_UNAVAILABLE);
 		}
+	}
+
+	/**
+	 * Liveness is switched off by configuration (or the exception photo gate is): the face is captured without a check.
+	 * This is allowed but never silent: one audit event and one WARN each time it happens.
+	 */
+	public void recordDisabled(String workflowName, String reason) {
+		String saved = workflow;
+		workflow = workflowName;
+		LOGGER.warn("Liveness check is OFF ({}): a face is captured without it for workflow {}", reason, workflowName);
+		audit(AuditEvent.REG_LIVENESS_DISABLED);
+		workflow = saved;
 	}
 
 	/** @param jpeg a frame from the device stream; never blocks */
@@ -178,6 +190,24 @@ public class LivenessCaptureCoordinator {
 		failures.put(key(), 0);
 		end(); // one live verdict stores one capture
 		return Gate.STORE;
+	}
+
+	/**
+	 * Same as {@link #decideStore(byte[], long)} for the list the device returned. Safe to call off the FX thread
+	 * (the screens call it inside the capture task). A missing or empty capture is a refused, counted attempt.
+	 */
+	public synchronized Gate decideStoreFor(java.util.List<io.mosip.registration.dto.packetmanager.BiometricsDto> captured,
+			long captureTimeoutMillis) {
+		byte[] iso = captured == null || captured.isEmpty() || captured.get(0) == null ? null
+				: captured.get(0).getAttributeISO();
+		if (iso == null) {
+			if (session == null) {
+				return Gate.REFUSE_UNAVAILABLE;
+			}
+			countFailure();
+			return Gate.REFUSE_UNBOUND;
+		}
+		return decideStore(iso, captureTimeoutMillis);
 	}
 
 	/** @return true when the retry limit is reached: the screen must stop offering another attempt */

@@ -169,8 +169,12 @@ public class Streamer {
 		}
 
 		// 255 indicates the start of the jpeg image
-		while (urlStream.read() != 255) {
-
+		// SAJEEV: the end of the stream (-1) must end the loop, or an unplugged camera spins this thread at 100% CPU
+		int startByte;
+		while ((startByte = urlStream.read()) != 255) {
+			if (startByte < 0) {
+				throw new java.io.EOFException("The device stream ended before the next image");
+			}
 		}
 
 		// && urlStream.read()!=-1

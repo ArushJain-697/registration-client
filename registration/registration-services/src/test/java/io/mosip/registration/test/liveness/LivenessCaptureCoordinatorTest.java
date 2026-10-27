@@ -212,4 +212,68 @@ public class LivenessCaptureCoordinatorTest {
 		assertTrue(f.closed);
 		assertEquals("a second capture was stored on the same live verdict", Gate.REFUSE_UNAVAILABLE, c.decideStore(png(), 3000));
 	}
+
+	@Test
+	public void test_failures_survive_a_new_popup() {
+		// a new popup is a new begin() on the same workflow: the failed attempts must still count
+		Fake f = new Fake(Phase.NOT_LIVE, false);
+		LivenessCaptureCoordinator c = with(f);
+		assertEquals(Gate.REFUSE_NOT_LIVE, c.pollBeforeCapture());
+		assertEquals(Gate.REFUSE_NOT_LIVE, c.pollBeforeCapture());
+		c.begin("RESIDENT"); // popup closed and reopened
+		assertEquals(Gate.REFUSE_NOT_LIVE, c.pollBeforeCapture());
+		assertTrue("three failures over three popups did not exhaust the retries", c.retriesExhausted("RESIDENT"));
+		c.begin("RESIDENT");
+		assertTrue("reopening the popup reset the counter", c.retriesExhausted("RESIDENT"));
+	}
+
+	@Test
+	public void test_a_store_resets_only_its_own_workflow_counter() throws Exception {
+		Fake bad = new Fake(Phase.NOT_LIVE, false);
+		LivenessCaptureCoordinator c = with(bad);
+		c.pollBeforeCapture();
+		c.begin("OPERATOR");
+		c.pollBeforeCapture();
+		assertEquals(1, c.failedAttempts());
+		bad.phase = Phase.LIVE;
+		bad.bound = true;
+		assertEquals(Gate.STORE, c.decideStore(png(), 3000));
+		assertEquals("a store did not reset its workflow", 0, c.failedAttempts());
+		c.begin("RESIDENT");
+		assertEquals("a store of OPERATOR reset RESIDENT", 1, c.failedAttempts());
+	}
+
+	@Test
+	public void test_missing_capture_list_is_refused_and_counted() {
+		Fake f = new Fake(Phase.LIVE, true);
+		LivenessCaptureCoordinator c = with(f);
+		assertEquals(Gate.REFUSE_UNBOUND, c.decideStoreFor(null, 3000));
+		assertEquals(Gate.REFUSE_UNBOUND, c.decideStoreFor(java.util.Collections.emptyList(), 3000));
+		assertEquals(2, c.failedAttempts());
+		c.end();
+		assertEquals(Gate.REFUSE_UNAVAILABLE, c.decideStoreFor(null, 3000));
+	}
+
+	@Test
+	public void test_switched_off_liveness_writes_an_audit_event_and_a_warn() {
+		io.mosip.registration.audit.AuditManagerService audit = org.mockito.Mockito.mock(io.mosip.registration.audit.AuditManagerService.class);
+		LivenessCaptureCoordinator c = new LivenessCaptureCoordinator();
+		c.setAuditManager(audit);
+		c.recordDisabled("RESIDENT", "enabled=false");
+		org.mockito.Mockito.verify(audit, org.mockito.Mockito.times(1)).audit(
+				org.mockito.Matchers.eq(io.mosip.registration.constants.AuditEvent.REG_LIVENESS_DISABLED),
+				org.mockito.Matchers.any(io.mosip.registration.constants.Components.class), org.mockito.Matchers.eq("RESIDENT"),
+				org.mockito.Matchers.anyString());
+	}
+
+	@Test
+	public void test_audit_ids_in_the_liveness_block_are_unique() {
+		java.util.Set<String> seen = new java.util.HashSet<>();
+		for (io.mosip.registration.constants.AuditEvent e : io.mosip.registration.constants.AuditEvent.values()) {
+			if (e.getId().startsWith("REG-LIV-")) {
+				assertTrue("duplicate id " + e.getId(), seen.add(e.getId()));
+			}
+		}
+		assertTrue(seen.contains("REG-LIV-007"));
+	}
 }

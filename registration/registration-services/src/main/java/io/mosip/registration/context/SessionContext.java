@@ -28,6 +28,8 @@ import io.mosip.registration.enums.Role;
 import io.mosip.registration.exception.RegBaseCheckedException;
 import io.mosip.registration.mdm.dto.MDMRequestDto;
 import io.mosip.registration.service.bio.BioService;
+import io.mosip.registration.service.liveness.LivenessAuthGate;
+import io.mosip.registration.service.liveness.LivenessCaptureCoordinator;
 import io.mosip.registration.service.login.LoginService;
 import io.mosip.registration.service.security.AuthenticationService;
 import io.mosip.registration.util.healthcheck.RegistrationSystemPropertiesChecker;
@@ -426,8 +428,11 @@ public class SessionContext {
 				.getIntValueFromApplicationMap(RegistrationConstants.CAPTURE_TIME_OUT), 1, io.mosip.registration.context.ApplicationContext
 				.getIntValueFromApplicationMap(RegistrationConstants.FACE_AUTHENTICATION_THRESHOLD));
 		
-		List<BiometricsDto> biometrics = bioService.captureModalityForAuth(mdmRequestDto);
-		if(authService.authValidator(authenticationValidatorDTO.getUserId(), BiometricType.FACE.value(), biometrics)) {
+		// SAJEEV: login by face passes the same liveness gate as the operator authentication (workflow OPERATOR)
+		List<BiometricsDto> biometrics = applicationContext.getBean(LivenessAuthGate.class).captureLive("OPERATOR",
+				() -> bioService.getStream(RegistrationConstants.FACE_FULLFACE),
+				() -> bioService.captureModalityForAuth(mdmRequestDto));
+		if(biometrics != null && authService.authValidator(authenticationValidatorDTO.getUserId(), BiometricType.FACE.value(), biometrics)) {
 			createSessionContext();
 			SessionContext.authTokenDTO().setLoginMode(loginMethod);
 			validAuthModes.add(loginMethod);
@@ -441,11 +446,25 @@ public class SessionContext {
 
 	}
 
+	/** SAJEEV: a new session (login) or the end of one starts the liveness attempt counters again. */
+	private static void resetLivenessAttempts() {
+		try {
+			LivenessCaptureCoordinator c = applicationContext == null ? null
+					: applicationContext.getBean(LivenessCaptureCoordinator.class);
+			if (c != null) {
+				c.resetAttempts();
+			}
+		} catch (RuntimeException e) {
+			LOGGER.error("Resetting the liveness attempts failed", e);
+		}
+	}
+
 	/**
 	 * Creating Session Context
 	 */
 	private static void createSessionContext() {
 		if (null == sessionContext) {
+			resetLivenessAttempts();
 			sessionContext = new SessionContext();
 			sessionContext.setId(UUID.randomUUID());
 			sessionContext.setMapObject(new HashMap<>());
@@ -836,6 +855,7 @@ public class SessionContext {
 	 * destroys the session
 	 */
 	public static void destroySession() {
+		resetLivenessAttempts();
 		sessionContext = null;
 		authModes.clear();
 		validAuthModes.clear();

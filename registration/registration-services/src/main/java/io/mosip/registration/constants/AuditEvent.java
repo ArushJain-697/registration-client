@@ -321,6 +321,7 @@ public enum AuditEvent {
 	REG_LIVENESS_CHALLENGE_RESULT("REG-LIV-004", USER_EVENT.getCode(), "REG_LIVENESS_CHALLENGE_RESULT", "Active challenge result"),
 	REG_LIVENESS_BINDING("REG-LIV-005", USER_EVENT.getCode(), "REG_LIVENESS_BINDING", "Captured face bound to the live face"),
 	REG_LIVENESS_VERDICT("REG-LIV-006", USER_EVENT.getCode(), "REG_LIVENESS_VERDICT", "Liveness verdict"),
+	REG_LIVENESS_DISABLED("REG-LIV-007", SYSTEM_EVENT.getCode(), "REG_LIVENESS_DISABLED", "Liveness check is switched off by configuration: a face was captured without it"),
 	REG_LIVENESS_ENGINE_UNAVAILABLE("REG-LIV-009", SYSTEM_EVENT.getCode(), "REG_LIVENESS_ENGINE_UNAVAILABLE", "Liveness engine unavailable"),
 	CLIENT_UPGRADE_JARS_DOWNLOADED("REG-UPG-001", USER_EVENT.getCode(), "CLIENT_UPGRADE_JARS_DOWNLOADED",
 			"Client Upgrade: Successfully downloaded all the upgrade jars"),

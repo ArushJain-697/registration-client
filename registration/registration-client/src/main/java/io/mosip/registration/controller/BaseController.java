@@ -75,8 +75,8 @@ import io.mosip.registration.scheduler.SchedulerUtil;
 import io.mosip.registration.service.BaseService;
 import io.mosip.registration.service.IdentitySchemaService;
 import io.mosip.registration.service.bio.BioService;
+import io.mosip.registration.service.liveness.LivenessAuthGate;
 import io.mosip.registration.service.liveness.LivenessCaptureCoordinator;
-import io.mosip.registration.service.liveness.LivenessMessages;
 import io.mosip.registration.service.config.GlobalParamService;
 import io.mosip.registration.service.operator.UserOnboardService;
 import io.mosip.registration.service.remap.CenterMachineReMapService;
@@ -1721,23 +1721,14 @@ public class BaseController {
 				1, io.mosip.registration.context.ApplicationContext
 				.getIntValueFromApplicationMap(RegistrationConstants.FACE_AUTHENTICATION_THRESHOLD));
 
-		// SAJEEV: liveness first (operator or supervisor), then capture, then binding, and only then the face match
-		boolean livenessOn = authLivenessCoordinator != null && io.mosip.registration.service.liveness.LivenessClientConfig.enabled();
-		if (livenessOn && !livenessPassedForAuth(isReviewer || !isPacketAuth ? "SUPERVISOR" : "OPERATOR")) {
-			LOGGER.warn("Face authentication refused: liveness not established");
+		// SAJEEV: liveness first (operator or supervisor), then capture, then binding, and only then the face match.
+		// The gate lives in registration-services and is shared with face login (SessionContext.validateFace).
+		List<BiometricsDto> biometrics = authLivenessGate.captureLive(isReviewer || !isPacketAuth ? "SUPERVISOR" : "OPERATOR",
+				() -> bioService.getStream(RegistrationConstants.FACE_FULLFACE),
+				() -> bioService.captureModalityForAuth(mdmRequestDto));
+		if (biometrics == null) {
+			LOGGER.warn("Face authentication refused: liveness not established or captured face not bound to the live face");
 			return false;
-		}
-
-		List<BiometricsDto> biometrics = bioService.captureModalityForAuth(mdmRequestDto);
-
-		if (livenessOn) {
-			byte[] iso = biometrics == null || biometrics.isEmpty() ? null : biometrics.get(0).getAttributeISO();
-			boolean stored = iso != null && authLivenessCoordinator.decideStore(iso, io.mosip.registration.service.liveness.LivenessClientConfig.captureTimeoutMillis()) == LivenessCaptureCoordinator.Gate.STORE;
-			authLivenessCoordinator.end();
-			if (!stored) {
-				LOGGER.warn("Face authentication refused: captured face not bound to the live face");
-				return false;
-			}
 		}
 
 		boolean match = authenticationService.authValidator(userId, SingleType.FACE.value(), biometrics);
@@ -1747,69 +1738,17 @@ public class BaseController {
 		return match;
 	}
 
-	@Autowired(required = false)
+	// Required on purpose: a missing gate must stop the client, not switch liveness off.
+	@Autowired
+	private LivenessAuthGate authLivenessGate;
+
+	@Autowired
 	private LivenessCaptureCoordinator authLivenessCoordinator;
 
-	/**
-	 * Streams the face camera into a liveness session until it is decided. Returns true only for LIVE; everything else
-	 * (no engine, attack, timeout, stream failure) returns false. The stream is closed before the device captures.
-	 */
-	private boolean livenessPassedForAuth(String workflow) {
-		java.io.InputStream stream = null;
-		javafx.stage.Stage promptStage = null;
-		javafx.scene.control.Label prompt = new javafx.scene.control.Label();
-		try {
-			stream = bioService.getStream(RegistrationConstants.FACE_FULLFACE);
-			if (stream == null || stream.read() == -1) {
-				return false;
-			}
-			authLivenessCoordinator.begin(workflow);
-			final javafx.scene.control.Label shown = prompt;
-			javafx.application.Platform.runLater(() -> {
-				javafx.stage.Stage st = new javafx.stage.Stage(javafx.stage.StageStyle.UTILITY);
-				st.setAlwaysOnTop(true);
-				st.setScene(new javafx.scene.Scene(new javafx.scene.layout.StackPane(shown), 420, 80));
-				st.show();
-				authPromptStage = st;
-			});
-			io.mosip.registration.controller.device.Streamer reader = new io.mosip.registration.controller.device.Streamer();
-			String lang = io.mosip.registration.context.ApplicationContext.applicationLanguage();
-			String code = lang == null ? "en" : lang.startsWith("fr") ? "fr" : lang.startsWith("ar") ? "ar" : "en";
-			while (true) {
-				authLivenessCoordinator.onFrame(reader.retrieveNextImage(stream));
-				io.mosip.registration.api.liveness.LivenessProgress p = authLivenessCoordinator.progress();
-				String key = p.getChallenge() != null ? p.getChallenge() : p.getGuidanceKey();
-				String text = LivenessMessages.text(key, code);
-				javafx.application.Platform.runLater(() -> shown.setText(text));
-				LivenessCaptureCoordinator.Gate g = authLivenessCoordinator.pollBeforeCapture();
-				if (g == LivenessCaptureCoordinator.Gate.START_CAPTURE) {
-					return true;
-				}
-				if (g != LivenessCaptureCoordinator.Gate.WAIT) {
-					return false;
-				}
-			}
-		} catch (Exception e) {
-			LOGGER.error("Liveness stream failed for authentication", e);
-			return false;
-		} finally {
-			if (stream != null) {
-				try {
-					stream.close();
-				} catch (java.io.IOException ignored) {
-					// closing only
-				}
-			}
-			javafx.application.Platform.runLater(() -> {
-				if (authPromptStage != null) {
-					authPromptStage.close();
-					authPromptStage = null;
-				}
-			});
-		}
+	/** SAJEEV: a new registration starts the liveness attempt counters again. */
+	protected void resetLivenessAttempts() {
+		authLivenessCoordinator.resetAttempts();
 	}
-
-	private volatile javafx.stage.Stage authPromptStage;
 	
 	private void addOperatorBiometrics(List<BiometricsDto> biometrics, boolean isReviewer) {
 		if (isReviewer) {

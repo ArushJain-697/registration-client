@@ -13,6 +13,8 @@ public final class LivenessClientConfig {
 	public static final String ENABLED = PREFIX + "enabled";
 	public static final String MAX_RETRIES = PREFIX + "maxRetries";
 	public static final String SESSION_TIMEOUT_MS = PREFIX + "sessionTimeoutMs";
+	/** The exception photo is a real face capture, so it is gated like a face unless this is exactly "false". */
+	public static final String EXCEPTION_PHOTO_ENABLED = PREFIX + "exceptionPhoto.enabled";
 	public static final String GUIDANCE_OVERRIDES = PREFIX + "guidance.overrides";
 
 	public static final boolean DEFAULT_ENABLED = true;
@@ -72,6 +74,12 @@ public final class LivenessClientConfig {
 	/** @return false only when the value is exactly "false"; anything else keeps liveness on */
 	public static boolean enabled() {
 		String v = raw(ENABLED);
+		return v == null || !"false".equalsIgnoreCase(v.trim());
+	}
+
+	/** @return false only when the value is exactly "false"; the exception photo is gated by default (F9) */
+	public static boolean exceptionPhotoEnabled() {
+		String v = raw(EXCEPTION_PHOTO_ENABLED);
 		return v == null || !"false".equalsIgnoreCase(v.trim());
 	}
 

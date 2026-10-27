@@ -51,6 +51,12 @@ import io.mosip.registration.mdm.dto.MDMRequestDto;
 import io.mosip.registration.mdm.dto.MdmBioDevice;
 import io.mosip.registration.mdm.service.impl.MosipDeviceSpecificationFactory;
 import io.mosip.registration.service.bio.BioService;
+import io.mosip.registration.api.liveness.LivenessProgress;
+import io.mosip.registration.service.liveness.LivenessCaptureCoordinator;
+import io.mosip.registration.service.liveness.LivenessClientConfig;
+import io.mosip.registration.service.liveness.LivenessMessages;
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
 import io.mosip.registration.service.operator.UserOnboardService;
 import javafx.concurrent.Service;
 import javafx.concurrent.Task;
@@ -257,7 +263,91 @@ public class BiometricsController extends BaseController /* implements Initializ
 
 	private Service<MdmBioDevice> deviceSearchTask;
 
+	// SAJEEV: operator onboarding captures the operator's own face, which becomes the reference template for operator
+	// and supervisor authentication. It passes the same gate as the resident capture: live first, then the device
+	// capture, then the binding, and only then the capture is accepted. Workflow OPERATOR.
+	@Autowired
+	private LivenessCaptureCoordinator livenessCoordinator;
+
+	private static final String LIVENESS_WORKFLOW = "OPERATOR";
+
+	private Timeline livenessPoll;
+
+	/** The binding verdict of the capture that just finished (set on the task thread). */
+	private volatile LivenessCaptureCoordinator.Gate capturedGate;
+
+	private boolean livenessRequired() {
+		if (livenessCoordinator == null || !(isFace(currentModality) || isExceptionPhoto(currentModality))) {
+			return false;
+		}
+		return LivenessClientConfig.enabled()
+				&& (!isExceptionPhoto(currentModality) || LivenessClientConfig.exceptionPhotoEnabled());
+	}
+
+	private void recordLivenessOff() {
+		if (livenessCoordinator != null && (isFace(currentModality) || isExceptionPhoto(currentModality))) {
+			livenessCoordinator.recordDisabled(LIVENESS_WORKFLOW, LivenessClientConfig.enabled()
+					? "mosip.registration.liveness.exceptionPhoto.enabled=false" : "mosip.registration.liveness.enabled=false");
+		}
+	}
+
+	private String livenessLang() {
+		String code = applicationContext.getApplicationLanguage();
+		return code != null && code.startsWith("fr") ? "fr" : code != null && code.startsWith("ar") ? "ar" : "en";
+	}
+
+	/** Shows the guidance on the screen and starts the device capture only when the person is live. */
+	private void startLivenessPolling() {
+		stopLivenessPoll();
+		livenessPoll = new Timeline(new KeyFrame(javafx.util.Duration.millis(200), e -> {
+			LivenessProgress p = livenessCoordinator.progress();
+			String key = p.getChallenge() != null ? p.getChallenge() : p.getGuidanceKey();
+			if (photoAlert != null) {
+				photoAlert.setText(LivenessMessages.text(key, livenessLang()));
+			}
+			LivenessCaptureCoordinator.Gate g = livenessCoordinator.pollBeforeCapture();
+			switch (g) {
+			case WAIT:
+				return;
+			case START_CAPTURE:
+				stopLivenessPoll();
+				if (photoAlert != null) {
+					photoAlert.setText("");
+				}
+				rCaptureTaskService();
+				return;
+			default:
+				stopLiveness();
+				generateAlert(RegistrationConstants.ERROR, LivenessMessages.text(
+						livenessCoordinator.retriesExhausted() ? "failure.max_retries"
+								: g == LivenessCaptureCoordinator.Gate.REFUSE_UNAVAILABLE ? "error.engine" : "failure.liveness",
+						livenessLang()));
+				streamer.setUrlStream(null);
+				SessionContext.setAutoLogout(true);
+				biometric.setDisable(false);
+			}
+		}));
+		livenessPoll.setCycleCount(Timeline.INDEFINITE);
+		livenessPoll.play();
+	}
+
+	private void stopLivenessPoll() {
+		if (livenessPoll != null) {
+			livenessPoll.stop();
+			livenessPoll = null;
+		}
+	}
+
+	private void stopLiveness() {
+		stopLivenessPoll();
+		streamer.setFrameListener(null);
+		if (livenessCoordinator != null) {
+			livenessCoordinator.end();
+		}
+	}
+
 	public void stopRCaptureService() {
+		stopLiveness();
 		if (rCaptureTaskService != null && rCaptureTaskService.isRunning()) {
 			rCaptureTaskService.cancel();
 		}
@@ -950,11 +1040,27 @@ public class BiometricsController extends BaseController /* implements Initializ
 							return;
 						}
 
-						rCaptureTaskService();
-
-						streamer.startStream(urlStream, biometricImage, biometricImage);
+						if (livenessRequired()) {
+							if (livenessCoordinator.retriesExhausted(LIVENESS_WORKFLOW)) {
+								generateAlert(RegistrationConstants.ERROR, LivenessMessages.text("failure.max_retries", livenessLang()));
+								streamer.setUrlStream(null);
+								SessionContext.setAutoLogout(true);
+								biometric.setDisable(false);
+								return;
+							}
+							// the face must be seen live BEFORE the device captures
+							livenessCoordinator.begin(LIVENESS_WORKFLOW);
+							streamer.setFrameListener(livenessCoordinator::onFrame);
+							streamer.startStream(urlStream, biometricImage, biometricImage);
+							startLivenessPolling();
+						} else {
+							recordLivenessOff();
+							rCaptureTaskService();
+							streamer.startStream(urlStream, biometricImage, biometricImage);
+						}
 						
 				} catch (RegBaseCheckedException | IOException exception) {
+					stopLiveness();
 					LOGGER.error("Error while streaming : ", exception);
 					generateAlert(RegistrationConstants.ERROR, RegistrationUIConstants.getMessageLanguageSpecific(RegistrationUIConstants.STREAMING_ERROR));
 
@@ -1043,7 +1149,13 @@ public class BiometricsController extends BaseController /* implements Initializ
 								"Capture request started" + System.currentTimeMillis());
 
 						currentSubType = getListOfBiometricSubTypes().get(currentPosition);
-						return rCapture(currentSubType, currentModality);
+						capturedGate = null;
+						List<BiometricsDto> captured = rCapture(currentSubType, currentModality);
+						if (livenessRequired()) {
+							// the binding inference runs here, on the task thread, never on the FX thread
+							capturedGate = livenessCoordinator.decideStoreFor(captured, LivenessClientConfig.captureTimeoutMillis());
+						}
+						return captured;
 
 					}
 				};
@@ -1056,6 +1168,7 @@ public class BiometricsController extends BaseController /* implements Initializ
 			public void handle(WorkerStateEvent t) {
 
 				LOGGER.debug(LOG_REG_BIOMETRIC_CONTROLLER, APPLICATION_NAME, APPLICATION_ID, "RCapture task failed");
+				stopLiveness();
 				generateAlert(RegistrationConstants.ERROR, RegistrationUIConstants.getMessageLanguageSpecific(RegistrationUIConstants.BIOMETRIC_SCANNING_ERROR));
 
 				LOGGER.debug(LOG_REG_BIOMETRIC_CONTROLLER, APPLICATION_NAME, APPLICATION_ID, "Enabling LogOut");
@@ -1076,6 +1189,16 @@ public class BiometricsController extends BaseController /* implements Initializ
 						"RCapture task was successful");
 				try {
 					List<BiometricsDto> mdsCapturedBiometricsList = rCaptureTaskService.getValue();
+					if (livenessRequired()) {
+						// nothing is validated, de-duplicated or stored until the capture is live AND bound
+						LivenessCaptureCoordinator.Gate gate = capturedGate;
+						if (gate != LivenessCaptureCoordinator.Gate.STORE) {
+							LOGGER.warn("Liveness refused the captured face: {}", gate);
+							generateAlert(RegistrationConstants.ERROR, LivenessMessages.text(
+									livenessCoordinator.retriesExhausted() ? "failure.max_retries" : "failure.liveness", livenessLang()));
+							return;
+						}
+					}
 					boolean isValidBiometric = isValidBiometric(mdsCapturedBiometricsList);
 					LOGGER.debug("biometrics captured from mock/real MDM was valid : {}", isValidBiometric);
 
@@ -1147,6 +1270,7 @@ public class BiometricsController extends BaseController /* implements Initializ
 					LOGGER.error("Exception while getting the scanned biometrics for operator onboarding", exception);
 					generateAlert(RegistrationConstants.ERROR, RegistrationUIConstants.getMessageLanguageSpecific(RegistrationUIConstants.BIOMETRIC_SCANNING_ERROR));
 				} finally {
+					stopLiveness();
 					// Enable Auto-Logout
 					SessionContext.setAutoLogout(true);
 					streamer.setUrlStream(null);

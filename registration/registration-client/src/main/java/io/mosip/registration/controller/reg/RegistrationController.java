@@ -151,6 +151,7 @@ public class RegistrationController extends BaseController {
 			SessionContext.map().put(RegistrationConstants.REGISTRATION_DATA,
 					packetHandlerService.startRegistration(null, processId));
 			getRegistrationDTOFromSession().setSelectedLanguagesByApplicant(selectedLangList);
+			resetLivenessAttempts(); // SAJEEV: a new registration starts the liveness retry counters again
 			return true;
 		} catch (RegBaseCheckedException ex) {
 			LOGGER.error("Error when creating RegistrationDTO", ex);

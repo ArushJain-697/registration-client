@@ -75,6 +75,8 @@ import io.mosip.registration.scheduler.SchedulerUtil;
 import io.mosip.registration.service.BaseService;
 import io.mosip.registration.service.IdentitySchemaService;
 import io.mosip.registration.service.bio.BioService;
+import io.mosip.registration.service.liveness.LivenessAuthGate;
+import io.mosip.registration.service.liveness.LivenessCaptureCoordinator;
 import io.mosip.registration.service.config.GlobalParamService;
 import io.mosip.registration.service.operator.UserOnboardService;
 import io.mosip.registration.service.remap.CenterMachineReMapService;
@@ -1719,13 +1721,33 @@ public class BaseController {
 				1, io.mosip.registration.context.ApplicationContext
 				.getIntValueFromApplicationMap(RegistrationConstants.FACE_AUTHENTICATION_THRESHOLD));
 
-		List<BiometricsDto> biometrics = bioService.captureModalityForAuth(mdmRequestDto);
+		// SAJEEV: liveness first (operator or supervisor), then capture, then binding, and only then the face match.
+		// The gate lives in registration-services and is shared with face login (SessionContext.validateFace).
+		List<BiometricsDto> biometrics = authLivenessGate.captureLive(isReviewer || !isPacketAuth ? "SUPERVISOR" : "OPERATOR",
+				() -> bioService.getStream(RegistrationConstants.FACE_FULLFACE),
+				() -> bioService.captureModalityForAuth(mdmRequestDto));
+		if (biometrics == null) {
+			LOGGER.warn("Face authentication refused: liveness not established or captured face not bound to the live face");
+			return false;
+		}
 
 		boolean match = authenticationService.authValidator(userId, SingleType.FACE.value(), biometrics);
 		if (match && isPacketAuth) {
 			addOperatorBiometrics(biometrics, isReviewer);
 		}
 		return match;
+	}
+
+	// Required on purpose: a missing gate must stop the client, not switch liveness off.
+	@Autowired
+	private LivenessAuthGate authLivenessGate;
+
+	@Autowired
+	private LivenessCaptureCoordinator authLivenessCoordinator;
+
+	/** SAJEEV: a new registration starts the liveness attempt counters again. */
+	protected void resetLivenessAttempts() {
+		authLivenessCoordinator.resetAttempts();
 	}
 	
 	private void addOperatorBiometrics(List<BiometricsDto> biometrics, boolean isReviewer) {
